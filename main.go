@@ -3,18 +3,20 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"image/color"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/sdassow/fyne-datepicker"
 )
@@ -215,6 +217,21 @@ func buildCoursesPage(win fyne.Window, courses *[]Course, saveNow func(), onChan
 		clearForm()
 	})
 	cancelBtn.Hide()
+	deleteBtn := widget.NewButton("Delete Course", func() {
+		if selected < 0 || selected >= len(*courses) {
+			return
+		}
+
+		*courses = append((*courses)[:selected], (*courses)[selected+1:]...)
+		selected = -1
+		list.UnselectAll()
+		clearForm()
+		list.Refresh()
+		saveNow()
+		onChange()
+	})
+	deleteBtn.Importance = widget.DangerImportance
+	deleteBtn.Hide()
 
 	saveBtn.OnTapped = func() {
 		ectsInt := float64(0)
@@ -267,9 +284,11 @@ func buildCoursesPage(win fyne.Window, courses *[]Course, saveNow func(), onChan
 		if selected >= 0 {
 			saveBtn.SetText("Save Changes")
 			cancelBtn.Show()
+			deleteBtn.Show()
 		} else {
 			saveBtn.SetText("Add Course")
 			cancelBtn.Hide()
+			deleteBtn.Hide()
 		}
 	}
 
@@ -338,7 +357,7 @@ func buildCoursesPage(win fyne.Window, courses *[]Course, saveNow func(), onChan
 			widget.NewFormItem("Difficulty", difficulty),
 			widget.NewFormItem("", completed),
 		),
-		container.NewHBox(saveBtn, cancelBtn),
+		container.NewHBox(saveBtn, cancelBtn, deleteBtn),
 	)
 
 	right := container.NewBorder(
@@ -359,6 +378,7 @@ func buildTasksPage(win fyne.Window, tasks *[]Task, courses *[]Course, saveNow f
 	const deadlineLayout = "02.01.2006"
 
 	selected := -1
+	visibleTaskIndexes := make([]int, 0, len(*tasks))
 
 	// ---- Form fields ----
 	taskName := widget.NewEntry()
@@ -390,9 +410,46 @@ func buildTasksPage(win fyne.Window, tasks *[]Task, courses *[]Course, saveNow f
 	effort := widget.NewSelect([]string{"Easy", "Medium", "Hard"}, func(string) {})
 	effort.PlaceHolder = "Effort"
 
+	showDone := widget.NewCheck("Show Done", nil)
+	showDone.SetChecked(true)
 
 	courseRef := widget.NewSelect([]string{}, func(string) {})
 	courseRef.PlaceHolder = "Course"
+	courseFilter := widget.NewSelect([]string{"All courses"}, nil)
+	courseFilter.SetSelected("All courses")
+
+	sortVisibleTasksByDeadline := func() {
+		sort.SliceStable(visibleTaskIndexes, func(i, j int) bool {
+			a := (*tasks)[visibleTaskIndexes[i]]
+			b := (*tasks)[visibleTaskIndexes[j]]
+			if a.Deadline.IsZero() && b.Deadline.IsZero() {
+				return a.Name < b.Name
+			}
+			if a.Deadline.IsZero() {
+				return false
+			}
+			if b.Deadline.IsZero() {
+				return true
+			}
+			if a.Deadline.Equal(b.Deadline) {
+				return a.Name < b.Name
+			}
+			return a.Deadline.Before(b.Deadline)
+		})
+	}
+	rebuildVisibleTasks := func() {
+		visibleTaskIndexes = visibleTaskIndexes[:0]
+		for i, t := range *tasks {
+			if !showDone.Checked && t.Completed {
+				continue
+			}
+			if courseFilter.Selected != "" && courseFilter.Selected != "All courses" && t.CourseRef != courseFilter.Selected {
+				continue
+			}
+			visibleTaskIndexes = append(visibleTaskIndexes, i)
+		}
+		sortVisibleTasksByDeadline()
+	}
 
 	refreshCourseOptions := func() {
 		opts := make([]string, 0, len(*courses))
@@ -413,6 +470,24 @@ func buildTasksPage(win fyne.Window, tasks *[]Task, courses *[]Course, saveNow f
 			}
 			if !found {
 				courseRef.ClearSelected()
+			}
+		}
+
+		filterOpts := append([]string{"All courses"}, opts...)
+		courseFilter.Options = filterOpts
+		courseFilter.Refresh()
+		if courseFilter.Selected == "" {
+			courseFilter.SetSelected("All courses")
+		} else {
+			found := false
+			for _, o := range filterOpts {
+				if o == courseFilter.Selected {
+					found = true
+					break
+				}
+			}
+			if !found {
+				courseFilter.SetSelected("All courses")
 			}
 		}
 	}
@@ -445,45 +520,113 @@ func buildTasksPage(win fyne.Window, tasks *[]Task, courses *[]Course, saveNow f
 		completed.SetChecked(t.Completed)
 	}
 
+	taskTypeColor := func(kind string) color.Color {
+		switch kind {
+		case "Exam":
+			return color.NRGBA{R: 198, G: 40, B: 40, A: 255}
+		case "Assignment":
+			return color.NRGBA{R: 37, G: 99, B: 235, A: 255}
+		case "AG":
+			return color.NRGBA{R: 34, G: 139, B: 34, A: 255}
+		default:
+			return color.NRGBA{R: 107, G: 114, B: 128, A: 255}
+		}
+	}
+
+	deadlineColor := func(deadline time.Time) color.Color {
+		if deadline.IsZero() {
+			return color.NRGBA{R: 107, G: 114, B: 128, A: 255}
+		}
+		now := time.Now()
+		if deadline.Before(now) {
+			return color.NRGBA{R: 198, G: 40, B: 40, A: 255}
+		}
+		if deadline.Before(now.Add(72 * time.Hour)) {
+			return color.NRGBA{R: 217, G: 119, B: 6, A: 255}
+		}
+		return color.NRGBA{R: 8, G: 145, B: 178, A: 255}
+	}
+
 	// ---- List ----
 	var list *widget.List
+	var updateModeUI func()
+	rebuildVisibleTasks()
+
 	list = widget.NewList(
-		func() int { return len(*tasks) },
+		func() int { return len(visibleTaskIndexes) },
 		func() fyne.CanvasObject {
-			title := widget.NewLabel("Task name")
+			title := canvas.NewText("Task name", theme.Color(theme.ColorNameForeground))
+			title.TextStyle = fyne.TextStyle{Bold: true}
+			title.TextSize = theme.TextSize() + 1
+
+			typeBg := canvas.NewRectangle(taskTypeColor("Exam"))
+			typeLabel := canvas.NewText("Exam", color.White)
+			typeLabel.Alignment = fyne.TextAlignCenter
+			typeLabel.TextStyle = fyne.TextStyle{Bold: true}
+			typeTag := container.NewPadded(container.NewStack(typeBg, container.NewCenter(typeLabel)))
+
+			deadlineText := canvas.NewText("01.01.2006", deadlineColor(time.Now()))
+			deadlineText.TextStyle = fyne.TextStyle{Bold: true}
+
+			meta := container.NewHBox(typeTag, deadlineText)
 			sub := widget.NewLabel("Effort • Course")
 			done := widget.NewCheck("Done", func(bool) {})
 
-			left := container.NewVBox(title, sub)
+			left := container.NewVBox(title, meta, sub)
 			row := container.NewBorder(nil, nil, nil, done, left)
 			return row
 		},
 		func(i widget.ListItemID, obj fyne.CanvasObject) {
-			t := (*tasks)[i]
+			taskIdx := visibleTaskIndexes[int(i)]
+			t := (*tasks)[taskIdx]
 
 			border := obj.(*fyne.Container)
 			left := border.Objects[0].(*fyne.Container)
-			title := left.Objects[0].(*widget.Label)
-			sub := left.Objects[1].(*widget.Label)
+			title := left.Objects[0].(*canvas.Text)
+			meta := left.Objects[1].(*fyne.Container)
+			typeTag := meta.Objects[0].(*fyne.Container)
+			typeBg := typeTag.Objects[0].(*fyne.Container).Objects[0].(*canvas.Rectangle)
+			typeLabel := typeTag.Objects[0].(*fyne.Container).Objects[1].(*fyne.Container).Objects[0].(*canvas.Text)
+			deadlineText := meta.Objects[1].(*canvas.Text)
+			sub := left.Objects[2].(*widget.Label)
 			done := border.Objects[1].(*widget.Check)
 
-			title.SetText(t.Name)
-			parts := []string{t.TaskType, t.Effort}
-			if t.CourseRef != "" {
-				parts = append(parts, t.CourseRef)
-			}
+			title.Text = t.Name
+			title.Refresh()
+
+			typeLabel.Text = t.TaskType
+			typeBg.FillColor = taskTypeColor(t.TaskType)
+			typeBg.Refresh()
+			typeLabel.Refresh()
+
 			if t.Deadline.IsZero() {
-				parts = append(parts, "No deadline")
+				deadlineText.Text = "No deadline"
 			} else {
-				parts = append(parts, t.Deadline.Format(deadlineLayout))
+				deadlineText.Text = t.Deadline.Format(deadlineLayout)
 			}
-			sub.SetText(strings.Join(parts, "  •  "))
+			deadlineText.Color = deadlineColor(t.Deadline)
+			deadlineText.Refresh()
+
+			if t.CourseRef != "" {
+				sub.SetText(fmt.Sprintf("%s • %s", t.CourseRef, t.Effort))
+			} else {
+				sub.SetText(t.Effort)
+			}
 
 			done.OnChanged = nil
 			done.SetChecked(t.Completed)
-			idx := int(i)
+			idx := taskIdx
 			done.OnChanged = func(v bool) {
 				(*tasks)[idx].Completed = v
+				rebuildVisibleTasks()
+				if selected == idx && !showDone.Checked && v {
+					selected = -1
+					list.UnselectAll()
+					clearForm()
+					if updateModeUI != nil {
+						updateModeUI()
+					}
+				}
 				list.Refresh()
 				saveNow()
 				onChange()
@@ -492,7 +635,7 @@ func buildTasksPage(win fyne.Window, tasks *[]Task, courses *[]Course, saveNow f
 	)
 
 	list.OnSelected = func(id widget.ListItemID) {
-		selected = int(id)
+		selected = visibleTaskIndexes[int(id)]
 		loadTaskIntoForm((*tasks)[selected])
 	}
 
@@ -508,6 +651,22 @@ func buildTasksPage(win fyne.Window, tasks *[]Task, courses *[]Course, saveNow f
 		clearForm()
 	})
 	cancelBtn.Hide()
+	deleteBtn := widget.NewButton("Delete Task", func() {
+		if selected < 0 || selected >= len(*tasks) {
+			return
+		}
+
+		*tasks = append((*tasks)[:selected], (*tasks)[selected+1:]...)
+		rebuildVisibleTasks()
+		selected = -1
+		list.UnselectAll()
+		clearForm()
+		list.Refresh()
+		saveNow()
+		onChange()
+	})
+	deleteBtn.Importance = widget.DangerImportance
+	deleteBtn.Hide()
 
 	saveBtn.OnTapped = func() {
 
@@ -530,8 +689,6 @@ func buildTasksPage(win fyne.Window, tasks *[]Task, courses *[]Course, saveNow f
 				Completed: completed.Checked,
 				Deadline:  selectedDeadline,
 			}
-			list.Refresh()
-			list.Select(selected)
 		} else {
 			// ---- Add append new Task ----
 			*tasks = append(*tasks, Task{
@@ -542,27 +699,31 @@ func buildTasksPage(win fyne.Window, tasks *[]Task, courses *[]Course, saveNow f
 				Completed: completed.Checked,
 				Deadline:  selectedDeadline,
 			})
-			list.Refresh()
 		}
 
+		rebuildVisibleTasks()
 		selected = -1
 		list.UnselectAll()
 		clearForm()
 		cancelBtn.Hide()
 		saveBtn.SetText("Add Task")
+		updateModeUI()
+		list.Refresh()
 		saveNow()
 		onChange()
 
 	}
 
 	//Toggle Ui mode based on selection
-	updateModeUI := func() {
+	updateModeUI = func() {
 		if selected >= 0 {
 			saveBtn.SetText("Save Changes")
 			cancelBtn.Show()
+			deleteBtn.Show()
 		} else {
 			saveBtn.SetText("Add Task")
 			cancelBtn.Hide()
+			deleteBtn.Hide()
 		}
 	}
 
@@ -580,6 +741,24 @@ func buildTasksPage(win fyne.Window, tasks *[]Task, courses *[]Course, saveNow f
 		updateModeUI()
 	}
 
+	showDone.OnChanged = func(bool) {
+		rebuildVisibleTasks()
+		selected = -1
+		list.UnselectAll()
+		clearForm()
+		updateModeUI()
+		list.Refresh()
+	}
+
+	courseFilter.OnChanged = func(string) {
+		rebuildVisibleTasks()
+		selected = -1
+		list.UnselectAll()
+		clearForm()
+		updateModeUI()
+		list.Refresh()
+	}
+
 	// ---- Layout ----
 	form := container.NewVBox(
 		widget.NewLabelWithStyle("Add / Edit Task", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -591,11 +770,11 @@ func buildTasksPage(win fyne.Window, tasks *[]Task, courses *[]Course, saveNow f
 			widget.NewFormItem("Course", courseRef),
 			widget.NewFormItem("", completed),
 		),
-		container.NewHBox(saveBtn, cancelBtn),
+		container.NewHBox(saveBtn, cancelBtn, deleteBtn),
 	)
 
 	right := container.NewBorder(
-		widget.NewLabelWithStyle("Tasks", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		container.NewHBox(widget.NewLabelWithStyle("Tasks", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), widget.NewLabel("Deadline (closest first)"), courseFilter, showDone),
 		nil, nil, nil,
 		list,
 	)
@@ -603,7 +782,15 @@ func buildTasksPage(win fyne.Window, tasks *[]Task, courses *[]Course, saveNow f
 	split := container.NewHSplit(form, right)
 	split.Offset = 0.36
 
-	return split, refreshCourseOptions
+	return split, func() {
+		refreshCourseOptions()
+		rebuildVisibleTasks()
+		selected = -1
+		list.UnselectAll()
+		clearForm()
+		updateModeUI()
+		list.Refresh()
+	}
 }
 
 func buildOverviewPage(courses *[]Course, tasks *[]Task) (fyne.CanvasObject, func()) {
